@@ -1588,3 +1588,57 @@ walk 的 `pending` 闭包改为读**共享原子数组**，同时起 1–2 个�
 1. 先读 `copies in the card's memory` 的实现，找出「每次 copy 一份记账」的地方；
 2. 用设备无关基准模拟「97,853 个 range、42 MB」的提交，量出**纯记账**的耗时；
 3. 若基准显示记账占大头，再改代码，否则不进游戏。
+
+---
+
+## 50. `copies in the card's memory` 的实现：三次全量遍历 + 每范围两次加锁
+
+代码在 `host.rs:5808-5836`（阶段标记之间）。这个阶段做六件事：
+
+```rust
+let picked = crate::picked::declare(runs);                 // ① 遍历全部 step
+for (shadow, at, len) in &picked.written {
+    shadow.writing(*at, *len);                             // ② 每个声明范围：pending + flights 两把锁
+}
+let declared = declared_writes(runs);                      // ③ 再遍历一次全部 step
+let card = self.card_before(&declared, &picked, flown);    // ④ 组出要上送的范围
+for (shadow, at, bytes) in batch.placed.drain(..) {        // ⑤ 每个已放置 copy 一次
+    shadow.placed_copy(at, &bytes);
+}
+```
+
+（另有一个 `self.settle(...)` 分支，那是等显卡，不是记账。）
+
+### 与 11.4 ms 的关系（假设，未测量）
+
+一帧约 97,853 个 range / 42 MB。若 `picked.written` 的规模与 range 数同量级，
+那么 ② 就是**近 10 万次「两把锁 + 一次 push」**；`writing()` 内部还要做
+`pending.contains(&range)` 的线性查找（`Vec` 上线性）。加上 ①③ 两次全量遍历，
+这足以解释「3.8 ms 的字节搬运 + 约 7.6 ms 的记账」。
+
+**但这是读代码得出的假设，不是测量。** 本阶段的教训是不能拿假设当结论。
+
+### 下一步要加的第一个探针（不要先改代码）
+
+在这个阶段内部加四个计时点，分别报：
+
+1. `picked::declare` 的耗时与 `picked.written.len()`；
+2. `writing()` 循环的总耗时（近 10 万次锁的量级会立刻显现）；
+3. `declared_writes` 的耗时与返回长度；
+4. `card_before` 的耗时与产出的范围数。
+
+若第 2 项占大头 ⇒ 改法是「批量声明」：把同一 copy 的多个范围合并成一次加锁
+（`writing` 已有一个「同 range 不重复 push」的检查，但那是线性查找，正好可以顺手改成一次遍历合并）。
+
+若第 1/3 项占大头 ⇒ 改法是「一次遍历产出两份结果」，避免重复走 step 列表。
+
+**两种改法都必须在设备无关基准里先看到下降，再进游戏。** 第 49 节的 memcpy 下限（42 MB = 3.825 ms）
+是唯一的对照基准。
+
+### 当前优先级（不变）
+
+| 阶段 | 现状 | 可攻上限 | 状态 |
+|---|---|---|---|
+| `copies in the card's memory` | 11.4 ms | 约 7.6 ms（13%） | **实现已读完，探针方案已定，未动手** |
+| `waiting for flights` | 14.2 ms | 未知 | 未评估 |
+| `refreshes` | 12–19 ms | 约 0.3 ms | 已证明到顶 |
