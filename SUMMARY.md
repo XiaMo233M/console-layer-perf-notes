@@ -1967,3 +1967,46 @@ t3 的结论是**成立**，但依据是**读代码**，不是差分测试：
 1. `send_copied`：实测 **0.7 次/提交 ≈ 21 次/帧 × 0.037 ms ≈ 0.8 ms/帧** ——不是 3.7，优先级下降；
 2. **画质**：GS 未接入运行时 + 一个 compute 着色器翻译失败（draws 全丢），这两条比剩下的 1–2 ms 更值得做；
 3. 60 fps 的缺口仍主要在 `lists' steps` 与「等显卡」两块，尚未在干净基线上重测。
+
+---
+
+## 58. 干净基线的整帧分解（17.3 fps / 57.8 ms）——两条杠杆的前提被推翻
+
+runner 从 `E:\vt\runner`、缓存已预热（命中 2,032）、`VICTORY_LOG=info`、取景 pareto-residency。
+
+```
+17.3 fps, 57.8 ms/frame (40.6 preparing: copies 14.9 ms 67.0 MB, textures 0.6 ms 20.8 MB;
+                         7.1 on the GPU; 24.4 copying back 36.4 MB), 3050 draws/frame,
+                         dropped 187 without a host pipeline
+```
+
+提交线程（每帧）：
+
+| 项 | ms |
+|---|---|
+| `lists' steps` | **19.4**（refreshes 13.8 / 69 次 flush、5,752 项，其中 4,597 已知不拷任何东西；copies and fills 仅 1.5） |
+| `copies in the card's memory` | **14.8** |
+| 标题字节 under flights | 6.3 |
+| 问写监视 | 4.5 |
+| 计划步骤（卡上） | 4.3 |
+| 等堆记录 | 2.6 |
+| 发送 lists | 1.6 |
+| **`waiting for flights`** | **0.0** |
+| 合计 | 约 54.1 |
+
+### 被推翻的两条前提
+
+1. **杠杆二不存在**：`waiting for flights` = **0.0**（旧记录 14.2 是缓存失效状态下的污染值）⇒ 没有 14.2 ms 可重叠。
+2. **杠杆一不存在**（t1 已证）：上送是 **67 MB / 5,752 次 flush**，不是 97,853 个 451 字节范围。
+
+**结论：60 fps 的 41 ms 缺口目前只能从 `lists' steps` 19.4 与 `copies in the card's memory` 14.8 两处找**，
+而这两处的 `_us` 口径已量出：copies 阶段七块合计约 7.2 ms，剩下约 7.6 ms 未分解（在 `card_before` 取锁前、
+`picked/declared/placed` 之外的路径）。
+
+### 画质问题的真正主因（比 GS 未接入更重要）
+
+每帧 **`dropped 187–222 without a host pipeline`**（约 3,000 draws 的 6–7% 被丢），
+而 `shader does not translate` 只有 **2 个**着色器 ⇒ **少数着色器翻译失败导致大批 draw 缺失**。
+PSO 库本身加载正常（95 MB、`host pipeline library loaded`），写失败 0，所以不是管线缓存问题。
+
+这条应优先于 GS 接入：它直接是「画面里缺东西」。
