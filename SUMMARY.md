@@ -727,3 +727,52 @@ geometry     195 / 195 validated        ← 目标达成
 ① 把 `shadow.writes_pending()`（一次 relaxed 原子读）提到 `ByCopy` 哈希查找之前；
 ② 相邻 step 属同一 copy 时复用上一次的答案（steps 常连续同 copy）。
 两处都只影响计数，不改变返回值集合；`cargo test -p victory-gpu --features diagnostics` = **405 passed / 0 failed**。
+
+---
+
+## 27. 更正：`writes_pending()` 取的是 Mutex，不是原子读
+
+第 25/26 节我写「`shadow.writes_pending()` 是一次 relaxed 原子读（~1 ns）」。**这是错的**：
+
+```rust
+pub(crate) fn writes_pending(&self) -> bool {
+    !self.pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty()   // Mutex
+}
+```
+
+实测反推也对得上：一次扫描走约 20,000 个 step，293 µs ≈ **15 ns/step**，正是无争用 Mutex 的量级。
+
+### 于是三次改动的真实归因
+
+| 版本 | 每次扫描的锁次数 | 中位 |
+|---|---|---|
+| baseline | 约 20,000 | 293 µs |
+| 把查询提到哈希查找之前 | 20,000（省了哈希，锁没省） | 205 µs |
+| ＋相邻同 copy 去重 | 约 **4,500** | **176 µs** |
+
+**起作用的是「相邻去重」（锁次数 ÷4.4）**，不是我以为的「原子读提前」。
+
+### 正解（尚未实施，原因见下）
+
+给 `pending: Mutex<Vec<(usize, usize)>>` 配一个 `pending_len: AtomicUsize`，让「是否为空」变成真正的无锁读：
+
+```rust
+pub(crate) fn writes_pending(&self) -> bool {
+    self.pending_len.load(Ordering::Relaxed) != 0
+}
+```
+
+- 结构体字段在 `shadow.rs:55`，**唯一初始化点**在 `:3030`（`pending: Mutex::default(),`）；
+- 维护点：`writing()`（`:3094` 取锁，`:3108`/`:3132` 两处 `push`）与
+  `copy_back_done()`（`:3415` 取锁，`:3418`/`:3420` 两处 `retain`）；
+- 预期：20,000 次查询从 ~293 µs 降到 ~20–40 µs（约 **10 倍**），且不需要相邻去重。
+
+### 为什么没有实施
+
+两处方法里各有多条路径（早退、`relay()` 分支、两处 `retain`），要让计数器在**每条**
+路径上都同步。漏一条的后果是「有 pending 却报没有」→ 漏刷 → 花屏或读到旧字节，
+而这正是评审在 `Batch::add` 上抓到过的同类缺陷。
+
+**必需的守门测试**（实施时必须一起写）：反复 `writing()` / `copy_back_done()`（含 relay 开/关
+两种模式）之后，断言 `pending_len.load() == pending.lock().len()`；再加一个多线程用例。
+没有这个测试，将来任何新增的变更点都会悄悄破坏不变量。
