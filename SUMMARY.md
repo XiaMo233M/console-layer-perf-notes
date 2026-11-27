@@ -889,3 +889,38 @@ cargo test -p victory-gpu --features diagnostics stale_walk_bench -- --ignored -
   就不必碰那些被跨线程写热的缓存行；
 - 代价：写入侧（`writing()` / `copy_back_done()`）要多维护一个结构，且**必须与 `pending` 严格同步**
   ——这正是第 28 节评估过、我当时因风险停手的那条路。现在它成了唯一有理论依据的方向。
+
+---
+
+## 31. 阶段验收（2026-11-27）
+
+```
+cargo test --workspace                     退出码 0（27 个 target 全 ok）
+  victory-shader  306 passed / 4 ignored
+  victory-gpu     405 passed / 38 ignored（--features diagnostics）
+  victory-loader   42（无特性）/ 45（有特性）
+
+victory.exe translate --validate <标题目录>   退出码 0，墙钟 180.5 秒
+  （VICTORY_GS=1，默认线程数 = 8，即第 24 节的修复在位）
+  顶点+像素  14259 emitted / 14259 validated
+  compute     2737 of 2763 emitted / 2737 validated
+  mesh        8765 emitted / 8694 validated
+  geometry     195 emitted / 195 validated        ← 第 24 节撤回的那条基线，回来了
+```
+
+### 这一阶段的两条结论
+
+**第一优先：已解决且已验证。** 「几何阶段挂死」实为**默认线程数缺陷**——28 逻辑核 →
+28 线程 × 约 800 MB = 22.5 GB，机器进入页面交换，表现为「CPU 零增长的挂死」。
+改成默认上限 8 后，同一命令 160–180 秒跑完。改动一行 + 注释。
+
+**第二优先：无可证的帧率收益。** 在 `refreshes`/`stale_under_flights` 这条路径上试过
+七种方法（逐页 BTreeMap、逐页 HashMap、前缀最大值、gap 256、gap 0、窄区间拆分、插入去重），
+并经三次交叉测量定性为**缓存一致性**（同代码同步骤数：隔离 6 ns/step、游戏 440–1085 ns/step、
+持锁 0 µs）。在现有测量手段（游戏内方差 2 倍以上）下，该热点的任何改动都无法证实或证伪。
+
+### 下一步的前提（不是代码，是基础设施）
+
+要在这类热点上有可信结论，必须先有**确定性提交负载**：能固定 draw 数、固定场景，
+让「改前/改后」在同一输入下比较。在那之前，只做有独立判据的改动（正确性、资源上限、
+可执行性），不做想当然的性能改动。
