@@ -1127,3 +1127,46 @@ pub fn translation_fingerprint() -> Vec<u8> { ... }        // emit/mod.rs:287
 ### 已记录的纪律仍然成立
 
 在修复之前，**任何影响 DXIL 的改动或开关变化都必须清空缓存**，不能依赖缓存自动失效。
+
+---
+
+## 38. 修复：缓存指纹改用自动开关清单（`VICTORY_GS` 等此前不被覆盖）
+
+### 更正第 37 节
+
+第 37 节说「`translation_fingerprint()` 从未被调用 ⇒ 缓存不认翻译器与开关」。**只对了一半**：
+
+- `emit::translation_fingerprint()` 确实是死代码（零调用点）；
+- **但缓存有自己的指纹**：`victory_gpu::shader_cache::build()`，并由
+  `cached(cache, &build(), container, translate)` 作为键的一部分。
+
+真正的缺陷是那份指纹里的开关列表是**手工维护的 12 个**：
+`WAVE_WIDE / WAVE_DEEP_SKIPS / WAVE_OWN_BITS / WAVE_LOCAL / F16_NEAREST / HELPER_OWN /
+FIRSTLANE_OWN / FIRST_HALF / STRICT_JOINS / MESH_OUTPUT_STRICT / BVH_FENCES / BVH_BOUNDS`。
+
+**`VICTORY_GS` 不在其中**（`VICTORY_E5_TARGETS` 等也不在）。源码注释里已经记录过同类事故：
+「一次 `VICTORY_WAVE_WIDE=0` 的运行被喂了该开关未设时的缓存」——当时的修法是**往手工列表里再加一个名字**。
+
+### 改动（两处）
+
+1. `crates/victory-shader/src/emit/mod.rs`：`pub fn switches() -> &'static str`，返回
+   `env!("VICTORY_SHADER_SWITCHES")`——这是 `build.rs` **扫描翻译器源码**得到的全部 `VICTORY_*` 名字；
+2. `crates/victory-gpu/src/shader_cache.rs`：指纹改为遍历 `switches()`，删掉那 12 个手工名字。
+
+于是任何开关（含 `VICTORY_GS`）自动参与指纹，将来新增开关也不需要第二次编辑。
+
+### 验证（判据是「换开关后应与冷缓存一致」）
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 热缓存，GS 关 | **29** 失败 / 44 s（错用 GS 条目） | **224** 失败 / 136 s（= 冷缓存）✓ |
+| 热缓存，GS 开 | 29 失败 | 29 失败 ✓ |
+| 同配置再跑（GS 关） | — | **45 s**，命中 ✓ |
+
+即：**换开关不再错用条目，同配置仍然命中**。测试 `victory-gpu` **405 passed / 39 ignored**
+（多出的 1 个 ignored 是第 29 节加的 `stale_walk_bench`）。
+
+### 影响
+
+- 已有的缓存目录会整体失效一次（指纹变了），首次重建约 136 秒——一次性的正确代价；
+- 从此「改完翻译器/换开关必须手动清缓存」这条人工纪律不再必要（源码哈希与全部开关都在键里）。
