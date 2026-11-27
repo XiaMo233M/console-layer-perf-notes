@@ -1783,3 +1783,45 @@ translate --validate (GS=1) 同上 + 几何 195/195 validated，180 秒
 |---|---|
 | `console-layer-perf-notes` | 过程记录、结论、已证伪方向、基准数字（本文件所在） |
 | `victory-compat-perf` | 兼容层源码本身，每次改动一个提交 |
+
+---
+
+## 54. `copies in the card's memory` 的分解：每帧做了 **24 次**、每次 400 µs 只处理 1 MB
+
+用 t2 交付的诊断构建（`--profile diag --features diagnostics`，日志要 `VICTORY_LOG=info`，脚本默认 warn 会吞掉）跑一次取景，读到 5 块分解：
+
+```
+copies_submissions=120  copies_frames=5   →  每帧 24 次提交
+每提交 µs：what_changed 153.0 | taken 121.1 | the_list 65.3 | compare 34.9 | before 30.4   合计 404.7
+每提交规模：dirty_copies 4.46 | dirty_ranges 90–169 | dirty_bytes 0.9–1.4 MB | declared_ranges 16.5 | compare_pieces 1,758
+```
+
+按每帧 24 次折算：
+
+| 块 | ms/帧 | 占比 |
+|---|---|---|
+| what changed（遍历 3,500 个 carded copy 找 4 个脏的） | **3.67** | 36% |
+| `send::take` 四趟 | **2.91** | 29% |
+| the list 录制 | 1.57 | 15% |
+| compare 录制 | 0.84 | 8% |
+| before 缓冲 | 0.73 | 7% |
+| 残差（picked/writing/declared/placed/取锁） | 约 1.7 | — |
+| **合计** | **9.72 + 残差 ≈ 11.4** | 与阶段总值吻合 |
+
+### 这条数据把结论从「找可攻的毫秒」变成了「每帧重复 24 次」
+
+**约 400 µs 的记账，只为处理约 1 MB、4 个脏 copy、90–170 个范围。** 而且每帧做 24 次。
+所以这个阶段的成本**不是数据量问题，是"重复次数"问题**：
+
+- 若能把遍历降为每帧一次 ⇒ 9.72 ms → **约 0.4 ms**，省 **约 9 ms/帧**；
+- 这相当于 60 fps 缺口（41 ms）的 **22%**，是目前找到的最大单项。
+
+### 下一步（已建任务）
+
+把「每提交一次」改成「每帧一次」，或按世代缓存遍历结果。正确性红线：**上送内容与顺序不得改变**——
+上一阶段 `Batch::add` 的丢段 blocker 就是这类错误，评审要专门盯这一点。
+
+### 顺带记下两条环境事实
+
+1. 诊断构建必须 `--profile diag --features diagnostics` 才有这行 info；`target\release` 的二进制里没有；
+2. `TEMP/TMP` 用 `E:\destop\test\gt6\vt-tmp`（仓库内目录会被资产策略拒绝——实测 `shader_cache` 的用例因此失败）。
