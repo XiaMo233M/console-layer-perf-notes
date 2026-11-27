@@ -2050,3 +2050,41 @@ t6 的上下界（下界 0.5 ms、上界 9 ms）实测落在**下界附近**。
 t6 与 t5 的 `*_ms_frame` 字段**都算错**（报出 2393 ms/帧、8020 ms/帧，而整帧只有 57–69 ms）。
 两次都是「每帧 = 总和 / 某个 frames 计数」，而那个 frames 与窗口不匹配。
 **今后新增每帧字段必须先自证**：用同一窗口里的 `submissions` 与帧行里的 fps 交叉核对，对不上就不要用。
+
+---
+
+## 60. 找到了：「refreshes 15.4 ms」其实是 `Batch::add`，不是 flush
+
+### 代码位置（决定性的）
+
+```rust
+stage.next("submit: the lists' steps");
+for list in runs { list.run_deferred(&mut batch, &air, …) }   // ← 15.4 ms 在这里（收集刷新）
+batch.fill();
+stage.next("submit: the last refreshes");
+batch.flush();                                                 // ← t6 量的 2.05 ms 在这里
+```
+
+帧行把 `refreshes 15.4 ms` 放在「the lists' steps」这一段的括号里，而 flush 属于**下一个** stage
+（「the last refreshes」）。所以：
+
+- **t6 拆的 flush = 2.05 ms/帧**（正确但找错了地方）；
+- **真正的大头是 `run_deferred` 里收集刷新时的 `Batch::add`**：62 次 flush/帧、6,101 项/帧
+  ⇒ **2.5 µs/项**、**15.4 ms/帧**。
+
+### 这条修正的意义
+
+1. 之前「flush 只占 2.05 ms，剩下 13.3 ms 没人量」的表述要改：**13.3 ms 不是没人量，而是量错了对象**；
+2. 60 fps 缺口 41 ms 中，**15.4 ms 是这一处**——是目前找到的最大单项；
+3. `Batch::add` 之前被本阶段判定为「已经最优」（合并 min..max），但那是**宽度**层面的结论，
+   **从来没量过它的每次调用成本**（2.5 µs 对一次哈希 + 区间合并来说高得离谱）。
+
+### 下一步（已建任务）
+
+拆 `Batch::add` 的 2.5 µs/项：加锁 / `ByCopy` 查找 / 区间合并 / `Vec` push / 缓存未命中，各占多少。
+同时给设备无关基准（3,500 shadow、6,101 项，首项多与重复项多两种形态）。
+
+### 给后续所有每帧字段的硬规矩
+
+t5 与 t6 的 `*_ms_frame` 都算错（8020、2393 ms/帧 vs 整帧 57–69 ms）。
+**新增每帧字段必须先用同一窗口的提交数与帧行 fps 交叉核对**，对不上就不能发布。
