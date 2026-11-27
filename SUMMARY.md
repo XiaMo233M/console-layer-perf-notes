@@ -615,3 +615,40 @@ geometry      195 emitted of 195 / 195 validated      ← 这一条回来了
 
 1. 「几何 lowering 有死循环」——CPU 一直满负荷，是慢不是卡；
 2. 「`dxil.dll` 校验器在几何程序上挂住」——不校验同样慢，校验只多加 10 秒。
+
+---
+
+## 24. 修复：`translate` 的默认线程数按上限收敛
+
+**改动**（`apps/victory/src/translate.rs`，仅一处 + 注释）：
+
+```rust
+const THREADS_CAP: usize = 8;
+let threads = jobs.unwrap_or_else(|| {
+    std::thread::available_parallelism().map_or(4, |n| n.get().min(THREADS_CAP))
+});
+```
+
+`--jobs` 仍可显式要求更多；只改「未指定时的默认」。
+
+**依据（实测，同机 28 逻辑核、`VICTORY_GS=1`）**：每线程约 800 MB
+（28 线程 22.5 GB 且 35 分钟未完成）；8 线程 1.83 GB、160 秒完成。
+
+**验证（不带 `--jobs`，即走新默认）**：
+
+```
+墙钟 160.3 秒，RSS 峰值 1.68 GB
+顶点+像素  14259 / 14259 validated
+compute     2737 of 2763 / 2737 validated
+mesh        8765 / 8694 validated
+geometry     195 / 195 validated        ← 目标达成
+```
+
+测试：`victory(app)` 10 + 2 passed；`victory-shader` 306 passed / 4 ignored（与基线一致）。
+该改动只影响线程数，不产生任何 DXIL，因此**不需要重建着色器缓存**。
+
+### 为什么没有一并改 `precompile`
+
+同一文件里 `precompile`（`victory.exe shaders`）也用 `available_parallelism()` 作默认，
+但它在 28 线程下实测 95 秒完成、没有内存问题——**没有证据表明它需要收敛**，
+所以不动它。等有了它的内存曲线再谈。
