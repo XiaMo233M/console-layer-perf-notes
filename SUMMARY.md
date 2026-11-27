@@ -1642,3 +1642,40 @@ for (shadow, at, bytes) in batch.placed.drain(..) {        // ⑤ 每个已放�
 | `copies in the card's memory` | 11.4 ms | 约 7.6 ms（13%） | **实现已读完，探针方案已定，未动手** |
 | `waiting for flights` | 14.2 ms | 未知 | 未评估 |
 | `refreshes` | 12–19 ms | 约 0.3 ms | 已证明到顶 |
+
+---
+
+## 51. 阶段终检（2026-11-27 末）
+
+```
+标准 release 构建           退出码 0
+victory-gpu  (diagnostics)  405 passed / 0 failed / 42 ignored
+victory-shader              306 passed / 0 failed / 4 ignored
+translate --validate        顶点+像素 14259/14259、compute 2737 of 2763、mesh 8765/8694
+translate --validate (GS=1) 同上 + 几何 195/195 validated，180 秒
+4 个设备无关基准             均亚秒出数：walk 4.8–6.3 ns/step，争用 12→121，锁/原子 30.4 vs 11.9，memcpy 42 MB 3.825 ms
+```
+
+### 落地并被验证的改动（4 处代码 + 1 处置信）
+
+1. `apps/victory/src/translate.rs`：默认线程上限 8 —— **几何阶段从跑不完到 180 秒跑完**；
+2. `crates/victory-shader/src/emit/mod.rs` + `crates/victory-gpu/src/shader_cache.rs`：
+   缓存指纹改用 `build.rs` 自动生成的开关清单 —— **换开关不再复用另一状态的条目**；
+3. `crates/victory-gpu/src/shader_cache.rs`：写盘失败降级为无缓存翻译 —— **不再因写不进缓存而丢 draws**；
+4. `crates/victory-gpu/src/shadow.rs`：`pending_len` 原子读 —— **2.5×（0.26 ms/帧），有断言守门且被测试覆盖**。
+
+### 交给下一阶段的东西
+
+- **下一个靶已量化**：`copies in the card's memory` 11.4 ms，而搬 42 MB 只需 3.825 ms
+  ⇒ **约 7.6 ms（帧的 13%）是记账**，比 `refreshes` 那条约 0.3 ms 的天花板大 25 倍；
+- **可疑结构已定位**（`host.rs:5808-5836`）：三次全量遍历（`picked::declare`、`declared_writes`、
+  再一个循环）+ 每个范围 `writing()` 里的两把锁与一次线性 `contains`；
+- **第一步不是改代码**，是给那四处各加一个计时点，量出分解（方案已写在第 50 节）；
+- **基准已就绪**：4 个设备无关基准、亚秒出数，改完先在上面看下降，再进游戏。
+
+### 这一阶段最贵的一课（写给下一个人）
+
+指标口径错了，后面的结论全部作废。实际发生过三次：
+「只看日志最后 3 行 ⇒ 判无效」；「分母随场景变化 ⇒ −40% 不可比」；
+「把 12→121 的增量归因为缓存行，其实是 pending 为真时的额外工作」。
+每一次都是**测量方法**的问题，不是代码的问题。
