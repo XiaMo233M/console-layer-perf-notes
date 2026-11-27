@@ -2,12 +2,12 @@
 # window: the git credential manager needs a desktop to hand over the token
 # (it cannot do that from a non-interactive shell).
 #
-# One-time: create an EMPTY public repo named gta6-pc-notes at
+# One-time: create an EMPTY public repo named console-layer-perf-notes at
 #   https://github.com/new   (do NOT add a README, .gitignore or licence)
 # Then run:  powershell -ExecutionPolicy Bypass -File E:\vt\notes-gta6-pc\push.ps1
 param(
   [string]$User = 'XiaMo233M',
-  [string]$Repo = 'gta6-pc-notes',
+  [string]$Repo = 'console-layer-perf-notes',
   [string]$Proxy = 'http://127.0.0.1:10812'
 )
 $ErrorActionPreference = 'Continue'

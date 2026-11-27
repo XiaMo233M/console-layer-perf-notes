@@ -1,10 +1,10 @@
-# GTA6 Xbox → PC 兼容层：移植与性能工作总结
+# 主机游戏兼容层：移植与性能工作总结
 
 本仓库只记录**工作内容**：测量数据、结论、可复现的方法与踩过的坑。
 不含游戏素材、不含游戏资源、不含上游源码。
 
-- 被测对象：`GTA6.Xbox.v1.0.2.1-CYBERLEEK`（Xbox Series 版）
-- 引擎：cool_fox / VIctory 兼容层（GPL-3.0，上游 `DoubleGhosty/cool_fox`）
+- 被测对象：`（标题目录）`（主机版）
+- 引擎：一个开源兼容层（GPL-3.0）
 - 机器：RTX 5070 Ti（16 GB 级显存）、48 GB 内存、Windows 11
 
 ---
@@ -156,7 +156,7 @@ tiled 资源的映射等待。
 
 ### 2026-11-27 启动脚本默认值：稀疏驻留改为关闭
 
-`Play-VIctory.cmd` / `Play-VIctory-seriesx.cmd` 中 `VICTORY_LEVELS_ON_DEMAND` 的默认值由 `1` 改为 `0`
+启动脚本中 `VICTORY_LEVELS_ON_DEMAND` 的默认值由 `1` 改为 `0`
 （脚本内附依据注释；设为 `1` 可复测）。
 
 不带任何环境变量、纯走启动脚本默认的实测：
