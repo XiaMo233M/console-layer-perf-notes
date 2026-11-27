@@ -1825,3 +1825,60 @@ copies_submissions=120  copies_frames=5   →  每帧 24 次提交
 
 1. 诊断构建必须 `--profile diag --features diagnostics` 才有这行 info；`target\release` 的二进制里没有；
 2. `TEMP/TMP` 用 `E:\destop\test\gt6\vt-tmp`（仓库内目录会被资产策略拒绝——实测 `shader_cache` 的用例因此失败）。
+
+---
+
+## 55. 缓存 0 命中的真因：**从 `cool_fox\target\` 下启动的进程写文件被系统拒绝**
+
+### 事实链（逐步排除后确证）
+
+| 检查 | 结果 |
+|---|---|
+| CLI 与游戏打印的缓存键 | **完全一致**（`build=aab5f97c5f462d5c view_heap=999999 raw_views=0 loop_limit=1048576 group_sync=2 shader_opt=63`） |
+| 缓存根目录 | 两边都是 `cfg.cache_subdir("shaders")` ⇒ 同一路径 |
+| 失败的具体调用 | `staging a file in E:\vt-cache-cf\shaders\5b: 拒绝访问 (os error 5)` |
+| 目录 ACL | `Authenticated Users: Modify`（允许），我的 shell 提权，可正常读写 |
+| 代码里是否有身份模拟/子进程降权 | **没有**（全仓搜 `ImpersonateLoggedOnUser`/`CreateProcessAsUser`/`SetThreadToken` 无命中） |
+
+### 四路对照（决定性）
+
+| 可执行文件 | 目标目录 | 结果 |
+|---|---|---|
+| `E:\vt-cfd\release\victory.exe` | `E:\vt\probe-a` | **成功**（建目录 + 25,761 个 + 136 s） |
+| 同一二进制改名 `E:\vt\probe.exe` | `E:\vt\probe-b` | **成功** |
+| **`...\cool_fox\target\diag\victory.exe`** | `E:\vt\probe-c` | **失败** `os error 5` |
+| `E:\vt-cfd` 的 exe | `%LOCALAPPDATA%\VIctory\probe-d` | **成功** |
+
+**结论：限制跟着「可执行文件所在路径」走** —— 凡从 `...\cool_fox\target\` 启动的进程，写文件一律被拒；
+换成同名同内容的 `E:\vt\probe.exe` 就正常。这不是权限、不是模式、不是文件名，是**路径级应用控制**
+（WDAC / AppLocker / 安全软件的「程序执行控制」）。
+
+### 后果（严重）
+
+游戏 runner 一直是 `target\release\victory.exe` ⇒ **每次运行都在现译着色器、写缓存全失败**：
+
+```
+from the cache : 0        write failed : 1,408（debug 运行 45 秒）
+```
+
+**所以此前所有游戏内数字（12 fps、57.6 ms 分解、5 块分解）都是「边译边跑」状态下取的。**
+用户提出的质疑成立，且比原先判断的更严重（我先前误以为「大部分命中、8% 失败」）。
+
+### 可用做法
+
+把 runner 放到允许的路径：`E:\vt\runner\victory.exe`（同一二进制），并用启动脚本的全套环境变量直接调用
+`victory.exe run <title> --console series-x --execute`。实测：
+
+```
+write failed : 1,408 → 2
+```
+
+——写缓存恢复，剩下的只是让它把条目写满、第二次运行才能命中。
+
+### 附带发现（画质问题的两个确定原因）
+
+1. **一个 compute 着色器翻译不出来**：`hash=02384a60fda6f2d0`，`no wave32 lowering for this wave64 program` ⇒
+   它的 draws 全部丢弃（与「植被色彩融合不对」的怀疑吻合）。
+2. **标题的几何着色器没接进运行时**：`pipeline/host.rs:723` 的 GS 槽位填的是内部 `rect_gs`，
+   我们翻译出的 195 个几何程序从未执行 ⇒ 体素 GI / 植被一类效果缺失。
+3. 「默认 4K 过度渲染」**可以排除**：日志明确 `display mode reported to the title width=2560 height=1440`。
