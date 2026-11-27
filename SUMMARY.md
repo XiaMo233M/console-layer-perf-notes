@@ -220,3 +220,37 @@ ranges [(10,20),(15,30)]  查询 [10,21)
 
 - **撤回改动一律用 `git checkout --` / `git stash`，不要用脚本删文本**；
 - **每轮核对 `N passed` 这个数字**，不能只看「是否全绿」。基线：`victory-gpu` 394 / `victory-shader` 306。
+
+---
+
+## 12. 基线（本阶段最后一次完整核对）
+
+命令与结果，供回归对照：
+
+```
+cargo test --workspace
+  victory-shader   306 passed / 4 ignored
+  victory-gpu      394 passed / 34 ignored
+  loader            43 passed
+  退出码 0
+
+victory.exe translate --validate <标题目录>
+  全部程序        26177 translated of 26177
+  顶点+像素 I/O   14259 of 14259
+  DXIL 顶点+像素  14259 emitted / 14259 validated
+  compute          2737 emitted of 2763 / 2737 validated
+                   （26 个为 wave64 无 wave32 降级路径）
+  mesh             8765 emitted of 8765 / 8694 validated
+                   （71 个为固有上限：顶点+图元输出 > 32768 字节）
+  退出码 0
+
+VICTORY_GS=1 时追加
+  geometry         195 emitted of 195 / 195 validated
+```
+
+`8694/8765` 与 `195/195` 与早先记录逐字一致，说明本阶段的改动没有影响翻译器。
+
+## 13. 技术标识符说明
+
+文中保留 `victory.exe`、`VICTORY_*` 环境变量、`victory-gpu` / `victory-shader`
+这类技术标识符——复现测量需要它们。**不使用任何游戏名、平台名、发行版本名。**
