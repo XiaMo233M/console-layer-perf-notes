@@ -1435,3 +1435,36 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
 为什么**同一个 exe**、同一用户、同一目录，`run` 模式写不进而这 8% 之外又能写进
 （因为 92% 是命中，说明之前某个时刻写成功过）。下一步要用 Process Monitor 抓一次
 `os error 5` 的具体调用栈与返回，而不是继续猜测。
+
+---
+
+## 46. 否证：缓存写失败不是「并发写同一键」的竞态（并已撤回该改动）
+
+第 45 节留下的 8% 写失败，本轮假设是**两个线程同时翻译同一个键**，
+后到的 `rename` 撞上已存在的目标 → Windows 返回 `os error 5`。
+
+### 反证
+
+在修复版上跑游戏 140 秒：
+
+```
+写失败次数        : 1968        ← 与修复前完全一样
+别人先写入（命中）: 0           ← 该分支从未进入
+```
+
+**0 次进入新分支** ⇒ rename 竞态不是原因。失败发生在更早的位置：
+`get_or_convert` 里唯一不带 `with_context` 的两处是 `create_dir_all(dir)?`（第 61 行）
+与 `tempfile_in` 的 `create_new(true)`（第 93 行）——日志里那些错误**没有**
+「converter … v1:」前缀，正好对应这两处，最可能是**建新文件被拒**。
+
+### 已撤回
+
+按纪律，未证实的改动一律撤回：`crates/victory-pipeline/src/cache.rs` 恢复原状，
+`cargo test -p victory-pipeline` 7 passed，构建绿。
+
+### 这条线索的现状
+
+- 现象确定：游戏进程建新文件被拒（`os error 5`），同 exe 的 CLI 模式不被拒；
+- 影响面确定：约 8% 的缓存条目（1,968 / 25,761），**不足以解释 fps 差异**；
+- 已排除：目录权限、路径/卷、exe 差异、环境变量差异、并发 rename 竞态；
+- 下一步只在有 Process Monitor 抓到具体调用与返回后再投入，否则就是继续猜。
