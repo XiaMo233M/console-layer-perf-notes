@@ -2010,3 +2010,43 @@ runner 从 `E:\vt\runner`、缓存已预热（命中 2,032）、`VICTORY_LOG=inf
 PSO 库本身加载正常（95 MB、`host pipeline library loaded`），写失败 0，所以不是管线缓存问题。
 
 这条应优先于 GS 接入：它直接是「画面里缺东西」。
+
+---
+
+## 59. refresh 的 15.4 ms：flush 只占 2.05 ms，剩下约 13 ms 还没被任何计时覆盖
+
+### 实测（干净基线，runner 在 `E:\vt\runner`，诊断构建，62 次 flush/帧、6,101 项/帧）
+
+帧行：`refreshes 15.4 ms in 62 flushes of 6101`。
+
+t6 的 13 块（用 `_us`/flush × 62 折算，`_ms_frame` 字段换算有 bug 不可用）：
+
+| 块 | µs/flush | ms/帧 |
+|---|---|---|
+| `front_copy` | 20.5 | **1.27** |
+| `front_nothing` | 7.1 | 0.44 |
+| `front_steps` | 2.4 | 0.15 |
+| `front_insert` | 0.4 | 0.03 |
+| `front_ask` / `front_book` | 0.1 / 0.0 | 0.01 |
+| `pending_apart/nothing/ask/copy/book` | ≈1.0 合计 | 0.06 |
+| `one` / `one_nothing` | 0.9 / 0.5 | 0.05 / 0.03 |
+| **合计** | | **2.05** |
+
+### 结论：那 4,597 项「已知不拷」其实很便宜
+
+`front_nothing` 0.44 ms / 62 flush ⇒ 每次 flush 只 7.1 µs，**不是可攻的大项**。
+t6 的上下界（下界 0.5 ms、上界 9 ms）实测落在**下界附近**。
+
+### 真正的缺口：15.4 − 2.05 ≈ 13.3 ms 未被覆盖
+
+那个 15.4 ms 是 `SPLIT` 的**粗粒度标记**（`split.part()` 之间），覆盖的不止 flush：
+还包括 `run_deferred` 的逐 list 遍历、`ahead_and_pending` 过滤、`flush_one` 等，**这些从未被单独计时**。
+
+**所以下一刀不是继续拆 flush，而是把这 13.3 ms 的双标记之间再插 3–4 个 `split.part()` 把它二分**——
+机制现成、零风险、一次游戏跑就能定位。
+
+### 方法教训（第三次同类）
+
+t6 与 t5 的 `*_ms_frame` 字段**都算错**（报出 2393 ms/帧、8020 ms/帧，而整帧只有 57–69 ms）。
+两次都是「每帧 = 总和 / 某个 frames 计数」，而那个 frames 与窗口不匹配。
+**今后新增每帧字段必须先自证**：用同一窗口里的 `submissions` 与帧行里的 fps 交叉核对，对不上就不要用。
