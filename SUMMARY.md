@@ -1347,3 +1347,52 @@ fps 只有 4 是预期代价：没有缓存就只能每次重新翻译，这是�
 
 **注意**：这一步是环境/启动器问题，不是渲染器问题。但它对帧率的影响（7 → 12，约 +70%）
 比这一阶段所有渲染侧微优化加起来都大，且判据是二值的（写成功/失败），不受测量噪声影响。
+
+---
+
+## 44. 定位到加载器建 `images\` 失败，且只在游戏模式下发生
+
+### 代码位置
+
+`crates/victory-loader/src/windows.rs:55`：
+
+```rust
+pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
+    victory_core::ensure_outside_repo(dir)?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;   // :57
+```
+
+游戏模式（`victory.exe run <exe> --execute`）需要把标题的镜像写到 `<cache>\images\` 再用
+`LoadLibraryExW` 映射。失败就停在这里。
+
+### 实测矩阵（同一 exe、同一用户）
+
+| 模式 | 目标目录 | 结果 |
+|---|---|---|
+| `victory.exe shaders` | `E:\vt-cache-cf`（新建子目录） | **成功**（一小时写入 51,717 个文件） |
+| `victory.exe shaders` | `E:\vt-cache-ro` | 成功（目录存在时） |
+| `run --execute`（经启动脚本） | `E:\vt-cache-fresh`（**我新建、可写**） | **失败 `os error 5`** |
+| `run --execute` | `%LOCALAPPDATA%\VIctory\cache-pareto`（脚本默认） | **失败 `os error 5`**（目录最终不存在） |
+
+- 排除了「卷/路径」假设：用户目录下同样失败；
+- 排除了「目录权限」假设：PowerShell 在同一目录建文件/删文件都正常，ACL 为 `Authenticated Users:(M)`；
+- 排除了「我们的代码改令牌」假设：`Play-VIctory-seriesx.cmd` 无提权/降权语句，
+  `run` 路径也无 `CreateProcessAsUser`/`SetTokenInformation`/`Impersonate` 之类调用（全仓搜索无命中）。
+
+### 剩下的解释
+
+差异只存在于「**游戏模式 vs CLI 模式**」，而两种模式的代码都在同一进程里、同一用户下运行
+⇒ 最可能是**外部按进程/行为拦截**（安全软件对「加载并执行游戏」的进程做写入限制，
+对「离线批量翻译」的进程放行）。
+
+### 需要用户做的一步（我不能代替）
+
+**暂时停用 360 / 火绒的自定义防护或用例屏蔽，再跑一次**，看 `images\` 是否能建出来：
+
+- 若能 ⇒ 结论确认，把 `victory.exe` 与缓存目录加入白名单即可；
+- 若仍不能 ⇒ 排除安全软件，继续查（下一步：用 `Process Monitor` 抓 `os error 5` 的具体来源）。
+
+### 为什么这件事优先级最高
+
+写不进缓存 ⇒ 每次启动重译约 1,989 个着色器 ⇒ **fps 7 而非 12（约 +70%）**；
+而且这条链的终点正是用户遇到的黑屏（修复前，重译失败的程序的 draws 会被丢弃）。
