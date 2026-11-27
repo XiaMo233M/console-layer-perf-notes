@@ -1882,3 +1882,43 @@ write failed : 1,408 → 2
 2. **标题的几何着色器没接进运行时**：`pipeline/host.rs:723` 的 GS 槽位填的是内部 `rect_gs`，
    我们翻译出的 195 个几何程序从未执行 ⇒ 体素 GI / 植被一类效果缺失。
 3. 「默认 4K 过度渲染」**可以排除**：日志明确 `display mode reported to the title width=2560 height=1440`。
+
+---
+
+## 56. t5 已合并、t3 全量验证通过；一处数字要更正
+
+### 合并与验证
+
+- 代码已提交并推送：`d4564ec`（远端已确认一致）；
+- `cargo test --workspace` → **823 passed / 0 failed**；分 target：victory-gpu 带 diagnostics **406/0/43**（基线 405 + t5 的 1 个新单测）、无特性 355、victory-shader 306/0/4、victory-loader 42/0、victory-pipeline 7/0；
+- 三种构建均 exit 0；特性隔离实测：`copies_dirty_copies` 在纯 release 二进制里 **0 次**、诊断构建里存在；
+- `translate --validate` 154–156 s：顶点+像素 **14259/14259 validated**、compute **2763/2763**、mesh 8765/8694；`VICTORY_GS=1` 另加 **geometry 195/195**。
+
+**注意**：任务书里写的「compute 2737 of 2763」是本文第 414–436 行那段**已作废**的旧数字，正确基线是 **2763/2763**。
+
+### 数字更正：省的是 0.85 ms/帧，不是 3.6 ms/帧
+
+t5 自报「what_changed 153 µs/提交 → 1–3 µs ⇒ 省 3.6 ms/帧」。t3 用设备无关基准复核：
+
+| 口径 | 走全部 3,442 个 copy | 只走脏队列 | 省 |
+|---|---|---|---|
+| 每次提交 | **0.036–0.040 ms** | 0.000–0.004 ms | — |
+| 每帧（24 提交） | **0.9–1.0 ms** | 0.01–0.11 ms | **0.84–0.87 ms** |
+
+所以**基准支持的是 0.85 ms/帧**，不是 3.6 ms/帧。游戏内那次 `what_changed_us=153` 是在**缓存全失效、边译边跑**的污染状态下取的（见第 55 节），因此不可用。
+结论：这个改动**有效但小**（0.85 ms/帧，占 57.6 ms 的 1.5%），不是 60 fps 的答案。
+
+### 「内容与顺序不变」怎么确认的（诚实标注依据）
+
+t3 的结论是**成立**，但依据是**读代码**，不是差分测试：
+顺序靠 `Card::slot`（同一把锁内单调分配）+ 按 slot 排序复现旧顺序；每 copy 的范围仍是同一把锁里同一个 `joined_over(take(dirty), send_gap())`；
+`touched` 只有一个写入者，push 与 `swap(true)` 同在该 copy 的 `dirty` 锁内，四种交错都检查过，不存在「已 true 故没入队、而脏队列又被取走」的窗口。
+
+真正能证实的观测量在游戏跑里：`copies_dirty_copies / copies_dirty_ranges / copies_dirty_bytes / copies_up_regions` 与改前同场景一致。
+
+两处 t3 指出的非阻断瑕疵：t5 对「干净 copy 不再 forget」的理由不对（旧代码同样只对 touched 的 copy forget，结论对、理由错）；`CARDED` 现在只在每 5 s 的 `card_stats()` 里清理死引用。
+
+### 下一个候选（另一阶段，未动）
+
+`host.rs:7717` 的 `shadow::send_copied` 每个 `Step::Copy` 都把 3,442 个 copy 升级一遍（≈0.037 ms/次）。
+若一帧 100 次 `Step::Copy` 就是 3.7 ms/帧——**比 t5 大四倍**，属 `lists' steps` 阶段。已加 `copies_send_copied` 计数，等下一次干净的游戏跑判定。
