@@ -1080,3 +1080,50 @@ victory.exe translate --validate <标题目录>   退出码 0，墙钟 180.5 秒
 
 **这条要查清**，因为若「命中不看指纹」，那么换开关后旧条目会被错误复用——那是正确性缺陷。
 下一步：热缓存下先清 `VICTORY_GS` 再跑，看是否仍报 29；若仍报 29，就要去看 `precompile` 的查找键。
+
+---
+
+## 37. 缺陷：`translation_fingerprint()` 从未被调用，缓存不认翻译器与开关
+
+### 事实
+
+```rust
+/// Everything a translation depends on besides the container: the
+/// translator's own source (hashed at build time), the value of every
+/// `VICTORY_*` switch it reads, ... The shader cache keys on this instead of
+/// on the whole executable, so a rebuild that leaves the translator alone
+/// keeps its translations.
+pub fn translation_fingerprint() -> Vec<u8> { ... }        // emit/mod.rs:287
+```
+
+全仓搜索 `translation_fingerprint()`：**只有定义，零个调用点**。
+
+### 由此解释的三个现象
+
+| 现象 | 解释 |
+|---|---|
+| 冷缓存 GS 关 = **224** 个无法翻译 | 没有 GS，195 个几何程序确实翻译不了 |
+| 冷缓存 GS 开 = **29** | GS 救了这 195 个 |
+| **热缓存 GS 关 = 29**（44 秒，命中） | 读到了 GS 开时写下的条目 |
+
+第四行是缺陷的直接证据：**换开关后旧条目被复用**。
+
+### 为什么这严重
+
+这正是当初「黑屏」那一类故障的机制——**缓存与翻译器状态不匹配**。当时的处理是「改完翻译器就重建缓存」这个人工纪律；
+而这段代码本意是让缓存自动失效，只是它没有被接上。
+
+潜在后果：
+- 改过翻译器后不清缓存 → 用旧 DXIL，可能黑屏或错渲（已知会发生的故障模式）；
+- 换 `VICTORY_GS` / `VICTORY_E5_TARGETS` 等开关 → 复用另一配置的条目；
+- 只有在**缓存目录被清空**时才是干净的（本次冷缓存对照就是唯一可靠的做法）。
+
+### 修复方向（未实施）
+
+把指纹接进查找键。最可能是 `precompile` 的查找处（`victory_hle::modules::d3d12x::precompile`）与
+运行时的着色器查找处：两边都要把 `hash(container bytes, fingerprint)` 作为键，而不是只用容器哈希。
+**改动面在缓存层，风险中等但判据明确**：改完后「热缓存 + 换开关」应退化成冷缓存的行为（132 秒、224 失败）。
+
+### 已记录的纪律仍然成立
+
+在修复之前，**任何影响 DXIL 的改动或开关变化都必须清空缓存**，不能依赖缓存自动失效。
