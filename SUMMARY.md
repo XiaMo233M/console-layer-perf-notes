@@ -1199,3 +1199,45 @@ FIRSTLANE_OWN / FIRST_HALF / STRICT_JOINS / MESH_OUTPUT_STRICT / BVH_FENCES / BV
 且两种开关配置现在各自得到正确结果 ⇒ **改动可以保留**。
 
 副作用是**已有缓存整体失效一次**（本机已重建：无 GS 136 s / GS 136 s，之后同配置 45 s 命中）。
+
+---
+
+## 40. 修复：缓存写失败不再丢掉着色器（那次 `os error 5` 的真因）
+
+### 缺陷
+
+`shader_cache.rs:151` 原本是：
+
+```rust
+for _ in 0..2 {
+    let path = cache.get_or_convert(&converter, &input)
+        .map_err(|e| format!("{e:#}"))?;        // ← 写盘失败 = 硬错误
+```
+
+缓存写不进去（`拒绝访问 / os error 5`）时，整个调用返回 `Err`，上层
+（`victory_gpu::pipeline`）把它当成「着色器无法翻译」，于是**该程序的所有 draws 被丢弃**。
+而同一个函数末尾本来就有「直接翻译、不入缓存」的兜底，却被这个 `?` 绕过了。
+
+方向错了：**翻译是帧需要的东西，缓存条目只是便利**。写盘失败应当降级为「每次重新翻译」，
+而不是「丢掉这批 draw」。
+
+### 改动
+
+写盘失败时记一条 warn 并 `break` 出缓存尝试，落到函数末尾的
+`(converter.translate)(container)`，即无缓存翻译。
+
+### 状态（诚实）
+
+- `cargo build --release -p victory --features diagnostics` → 退出码 0；
+- `cargo test -p victory-gpu --features diagnostics` → **405 passed / 39 ignored**；
+- **运行时验收没做成**：想用「把缓存目录设为只读」来触发写失败，但 `icacls` 的拒绝会
+  继承到 `images\` 子目录，游戏在启动阶段就报 `Error: creating …\images`，根本走不到着色器加载。
+  第二次只禁写 `shaders\` 子目录，仍因继承失败。
+  所以这条改动目前只有「代码层与单元测试通过」，**没有运行时可观察的证据**。
+
+### 下次怎么做这个验收
+
+不要用目录权限。更可控的办法：加一个仅供测试的开关，让缓存写入**故意失败一次**
+（例如 `VICTORY_CACHE_WRITE_FAIL=1` 时在写入处返回错误），然后断言：
+① 日志出现 `translating without the cache`；② `draws/frame` 仍然大于 0。
+这样不需要动文件系统权限，也不会影响启动阶段的目录创建。
