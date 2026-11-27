@@ -1,0 +1,7 @@
+# logs, captures and binaries never belong here
+*.log
+*.png
+*.exe
+*.dll
+*.zip
+*.bin
