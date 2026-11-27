@@ -405,3 +405,45 @@ cargo test -p victory-gpu --features diagnostics bench_nothing_new -- --ignored 
 
 这条曲线也解释了此前全部失败：**逐页查找、HashMap、gap=256 都是在「单次检查」上做文章，
 而问题是「单次检查覆盖的宽度」**。
+
+---
+
+## 21. 基线更正（原第 12 节的三个数字是错的）
+
+原第 12 节记的 `loader 43`、`compute 2737/2763`、`geometry 195/195` 都不可用，现更正为
+**分 target + 分特性**的准确形式（2026-11-27 在当前工作树上重跑）：
+
+```
+cargo test --workspace                      退出码 0，全 target 0 failed
+  victory-shader                     306 passed / 4 ignored
+  victory-gpu   （无特性）           351 passed / 38 ignored
+  victory-gpu   （--features diag）  402 passed / 38 ignored   ← 394 基线 + 新增 8
+  victory-loader（无特性）            42 = 39 lib + 2 load_probe + 1 title_dlls
+  victory-loader（--features diag）   45 = 42 + 2 + 1
+```
+
+**`loader 43` 从来不存在**——无特性是 42，带特性是 45。原记录是我写错。
+
+```
+victory.exe translate --validate <标题目录>      exit 0
+  顶点+像素   14259 emitted / 14259 validated
+  compute      2763 emitted / 2763 validated     ← 原记 2737/2763 作废
+  mesh         8765 emitted / 8694 validated
+  containers 26599（614 duplicates）、programs 26177
+```
+
+compute 多出的 26 个来自 `victory-shader` 的未提交改动，与性能改动无关。
+
+### 几何阶段（`VICTORY_GS=1`）当前不可验证
+
+两次尝试都拿不到报告：一次约 35 分钟后常驻涨到 **22.5 GB**、随后 20 秒采样内 CPU 增量恒为 0（挂住）；
+另一次退出码 1 且留下活进程。两次都无 stderr、无几何程序行。
+**所以「195/195 已验证」在当前工作树上不成立，该数字撤回。** 需要单独定位（瓶颈在未跟踪的 `emit/gs.rs`）。
+
+### 两条测量纪律（新增）
+
+1. **跑测试前把 `TEMP`/`TMP` 指到工作区内**，否则会有 12 个写着 `os error 5` 的假失败
+   （子进程写 `%TEMP%` 被拒），足以把基线误判成回归。
+2. **存在一个偶发失败**：`descriptor::host::tests::views_off_their_elements_get_a_copy_of_their_bytes`
+   （`left 4194304` / `right 2048`）。单独跑通过、`--test-threads=1` 全量通过、复跑也通过 → 属测试间
+   全局状态遗留。**遇到它不要改代码，重跑并注记「偶发、复跑通过」。**
