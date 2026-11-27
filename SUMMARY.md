@@ -1170,3 +1170,32 @@ FIRSTLANE_OWN / FIRST_HALF / STRICT_JOINS / MESH_OUTPUT_STRICT / BVH_FENCES / BV
 
 - 已有的缓存目录会整体失效一次（指纹变了），首次重建约 136 秒——一次性的正确代价；
 - 从此「改完翻译器/换开关必须手动清缓存」这条人工纪律不再必要（源码哈希与全部开关都在键里）。
+
+---
+
+## 39. 缓存键改动之后的完整回归
+
+### 全绿的部分
+
+| 项 | 结果 |
+|---|---|
+| `cargo test --workspace` | **退出码 0** |
+| `translate --validate`（无 GS） | 182.8 s，顶点+像素 **14259/14259**、compute **2737 of 2763**、mesh **8765/8694** — 与基线一致 |
+| `translate --validate`（`VICTORY_GS=1`） | 182.2 s，同上 **+ 几何 195/195 validated** |
+| 游戏内运行（无 GS） | **12 fps / 81.4 ms/frame / 3215 draws/frame**，无 0-draw 的整帧、无 pipeline 创建失败 |
+
+### 日志里的告警（环境层面，非本次改动引入）
+
+1. `host pipeline library not serialised error=拒绝访问 (os error 5)` ×5
+   —— PSO 库写盘被拒。这是**另一个缓存子系统**（pipelines），与本次改的 shaders 键无关，
+   一直如此；后果是每次运行重建 PSO，不影响正确性。
+2. 一条 `shader does not translate; its pipelines' draws are dropped stage="vertex" hash=dfafaf38… error=拒绝访问`
+   —— 同样是写被拒导致该次翻译无法落盘。已知基线里本来就有 2 个无法翻译的程序，**但这一条带 os error 5，
+   更像是写盘权限而非翻译失败**，列入待查。
+
+### 对本次改动的判断
+
+缓存键改动只动「条目存到哪个键下」，不改变翻译内容。上面四项全部通过，
+且两种开关配置现在各自得到正确结果 ⇒ **改动可以保留**。
+
+副作用是**已有缓存整体失效一次**（本机已重建：无 GS 136 s / GS 136 s，之后同配置 45 s 命中）。
