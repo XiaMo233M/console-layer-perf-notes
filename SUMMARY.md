@@ -1742,3 +1742,44 @@ translate --validate (GS=1) 同上 + 几何 195/195 validated，180 秒
 `E:\vt\backup\cool_fox-src-20261127-1216.zip`（247 个文件，2 MB，不含 target/ 与 .git）
 与同目录 `baseline-20261127-1216.txt`（测试与 translate 计数、每帧分解、memcpy 下限）。
 任何结构性改动都可回到这里。
+
+---
+
+## 53. 代码仓库上线：只放兼容层源码，不放素材与启动脚本
+
+**https://github.com/XiaMo233M/victory-compat-perf**（公开，GPL-3.0-or-later）
+
+### 内容边界（已核实）
+
+| 项 | 结果 |
+|---|---|
+| 源码文件 | **251** 个（`crates/`、`apps/`、`xtask/`、`Cargo*`、`LICENSE`、`README.md`） |
+| 启动脚本 | **0**（`Play-VIctory*.cmd`、`scripts/play.ps1` 已从索引移除并列入 `.gitignore`，本地文件保留） |
+| 游戏素材 / 可执行 | **0**（`.rpf` `.exe` `.dll` `.png` `.log` 全部排除） |
+| 许可证 | GPL-3.0-or-later（沿用 `LICENSE`） |
+| README 顶部 | 新增「Scope of this repository」段落，写明**不含游戏素材/游戏代码/启动脚本**，并标注上游引用 |
+
+### 上游引用怎么写的（不猜）
+
+代码注释里反复出现 **`fxceless/victory-fork`**（GPL-3.0-or-later，多处按 commit 号致谢），
+`codec-d/cool_fox` 是 Windows 构建的分发仓库。README 里两者都写了，并说明本仓库是**源码工作副本**。
+
+### 推送上的两点实情（记下来免得以后再踩）
+
+1. **整段历史推不上去**：代理会在传输 pack 时截断，报 `remote unpack failed: index-pack failed`
+   或 `did not receive expected object`。换 HTTP/1.1、加 `http.postBuffer`、`--no-thin` 都无效。
+2. **可行做法**：只推当前树（孤儿提交），包最小、一次成功。
+   代价是**远端不含本仓库建立之前的历史**（本地那个 `codec_d` 的单提交不在远端）。
+   从这个快照之后，每次改动都是一个提交，A/B 与回退都在远端可见。
+3. 以后推送用本地分支 **`public-main`**（已 track `public/main`）：
+   ```
+   git add -A && git commit -m "…"
+   git push public public-main:main
+   ```
+
+### 与记录仓库的分工
+
+| 仓库 | 内容 |
+|---|---|
+| `console-layer-perf-notes` | 过程记录、结论、已证伪方向、基准数字（本文件所在） |
+| `victory-compat-perf` | 兼容层源码本身，每次改动一个提交 |
