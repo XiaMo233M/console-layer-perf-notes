@@ -1241,3 +1241,34 @@ for _ in 0..2 {
 （例如 `VICTORY_CACHE_WRITE_FAIL=1` 时在写入处返回错误），然后断言：
 ① 日志出现 `translating without the cache`；② `draws/frame` 仍然大于 0。
 这样不需要动文件系统权限，也不会影响启动阶段的目录创建。
+
+---
+
+## 41. 补上运行时证据：缓存写失败不再丢着色器
+
+第 40 节只有代码层证据。本轮加了一个**仅供测试的开关** `VICTORY_CACHE_WRITE_FAIL=1`：
+它在 `cached()` 里让 `get_or_convert` 的成功结果也被当作写失败处理，
+从而走到**与真实写盘失败完全相同**的分支（warn + `break` + 无缓存翻译）。
+
+### 验收（两个判据）
+
+```
+VICTORY_CACHE_WRITE_FAIL=1 运行 150 秒：
+  translating without the cache : 1977 次      ← 判据 ①
+  shader does not translate     : 2 次         ← 等于已知基线，没有变成上千
+  画面                          : 4 fps / 232 ms/frame / 4041 draws/frame   ← 判据 ②
+```
+
+**结论：当每一次缓存写入都失败时，游戏仍然绘制 4,041 draws/frame。**
+修复前，这 1,977 次每一次都会变成「着色器无法翻译 ⇒ 该程序的所有 draws 被丢弃」，
+量级上足以让画面大面积消失。
+
+fps 只有 4 是预期代价：没有缓存就只能每次重新翻译，这是「正确性优先」的代价，
+而且只在缓存确实写不进去时才会发生。
+
+### 这个开关的定位
+
+`VICTORY_CACHE_WRITE_FAIL=1` **只用于验证这条路径**，正常运行不要设置。
+保留它是因为：没有它就无法在文件系统正常时观察这条分支
+（第 40 节尝试用 `icacls` 拒绝写权限，结果拒绝继承到 `images\`，
+游戏在启动阶段就失败，走不到着色器加载）。
