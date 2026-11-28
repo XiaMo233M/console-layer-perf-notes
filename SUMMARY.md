@@ -2290,3 +2290,57 @@ copy_bytes_us_call × calls_frame = 17 ms/帧，而它自报 ms_frame = 5.74
 t10 的字节重复计 3,636 MB/帧、t11 的块计时全 0）。每次都差点被当成结论。
 **唯一一直可信的是帧行里那些长期存在的计数器**（preparing / copies / copying back / GPU / fps），
 它们彼此一致、可与 memcpy 地板对照。以后新增探针必须先与帧行交叉校验，否则不得使用。
+
+---
+
+## 66. 落地（landing）是结构性的：JOIN_PARTS 8/16/32 都改不动它
+
+### 实测（三次运行，每配置 140 秒，读新加的拆分计数）
+
+| JOIN_PARTS | 落地/帧（中位） | 等待/帧（中位） | fetch MB/帧 | fps / ms |
+|---|---|---|---|---|
+| 8 | **17.8** | 9.4 ms | 73.7 | 9 / 112.9 |
+| 16 | **18.8** | 6.8 ms | 74.9 | 8 / 122.3 |
+| 32 | **18.0** | 6.8 ms | 69.1 | 2 / 426.1 |
+
+**落地次数与 JOIN_PARTS 无关（17.8 / 18.8 / 18.0）** —— 它是「每个 relay 批次一次落地」，
+批次由标题的提交节拍决定，不是我们能通过合并 part 改的。
+
+`fetch_sync_roundtrips_frame = 0` ⇒ 全部落地都在 relay 侧。
+
+### 可攻的两处（都在这个数里）
+
+1. **读放大**：fetch **70–75 MB** 而实际合并进标题只有 **36 MB** ⇒ 约 2 倍。
+   按 15 GB/s 折算，多读的 35 MB ≈ **2.4 ms/帧**。方向：把比较粒度变细（按字节掩码而不是 64 KiB 片段打标志）。
+2. **每次落地的固定往返**：0.36–0.53 ms/次 × 18 次。
+   这部分是 Execute + Signal + SetEvent + Wait 的延迟，除非减少落地次数，否则改不动。
+
+### t14 为什么不成立（我上一轮的判断错了）
+
+我让 analyst 去做「把 17.8 次 fetch 合批到帧尾一次」，**但合批已经存在**：
+`relay_card_back`（host.rs:6131）的入参就是一批 flight，把所有 plan 的片段拼进同一张列表、只做一次
+Execute+Signal+SetEvent+Wait。那 17.8 是「17.8 个有片段的落地」，不是「17.8 个提交各取一次」。
+
+而**合并落地点触及正确性红线**：`Shadow::card_merge`（shadow.rs:4594）不只要写 shadow 的副本，
+还要写进**标题自己的内存**，而标题之后是裸 CPU load，不经过我们任何入口 ⇒ 无法证明逐帧尾合并后逐字节等价。
+analyst 按纪律回退、没留半成品 —— 这是对的。
+
+### 我的流程失误（必须记）
+
+`host.rs` 从 t10/t11 起就**超过了 xtask 资产策略的 655,360 B 上限**，因此 `cargo test --workspace`
+**一直红着**，而我这几轮只跑 `cargo test -p victory-gpu`，却多次对外说「workspace 绿」。
+t14 顺手把注释压到 655,219 B 后，我亲自验证：**workspace 退出码 0、27 个目标全绿**。
+**今后每轮必须跑一次 workspace 级测试，不能只跑单 crate。**
+
+### t13 的真机结果（画质线）
+
+`VICTORY_WAVE_WIDE=1` 下 26 个程序换形态、`shader does not translate` 降到 **0**，
+但**设备被移除、游戏崩溃**：
+
+```
+ERROR host GPU device removed after 37 submissions sent ahead of 265 lists
+VIctory: host GPU failure: ... (指定的设备接口或功能级别在此系统上不受支持)
+```
+
+⇒ wide 形态在这块 5070 Ti 上不稳定。已派 t16：把生效范围收窄到单个 digest 白名单（`#02384a60fda6f2d0`），
+其余 25 个保持原样，再上真机验证。
