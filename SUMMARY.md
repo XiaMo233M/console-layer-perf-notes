@@ -2591,3 +2591,52 @@ root 视图设置、以及 **TABLE 重写**（把描述符写进 shader-visible 
 
 `draw_*_us` 的除数又把 `draw_calls_frame`（30）当成了 draw 数（实际 5,773），差 192 倍。
 **只有 `share` 与帧行可用于判断**——这已是本项目第 7 次同类错误。
+
+---
+
+## 73. 真凶：每次 draw 打约 15 次 `CopyDescriptorsSimple`，只为写 478 字节
+
+### 实测（diag 构建，`bind_ok=0` ⇒ 每帧字段被门槛拦下，但 share 与计数可信）
+
+`State::bind` 内部的 share（与除数无关）：
+
+| 段 | share |
+|---|---|
+| **TABLES**（`State::tables`，draw.rs:1963→3817 起） | **83.5%** |
+| ROOTS（root 参数 setter） | 10.8% |
+| PSO（`SetPipelineState`） | 4.9% |
+| heaps / sig | 0.46% / 0.42% |
+
+冗余度与规模：
+
+```
+bind_table_groups_draw     = 7.01     组/次 bind
+bind_table_fresh_share     = 0.603    60% 的组每次 bind 都重写
+bind_table_entries_draw    = 14.9     每次 bind 写 14.9 个条目
+bind_descriptor_bytes_draw = 478 B    只有 478 字节
+bind_pso_set_share         = 0.264    管线已缓存（只在变更时设）
+bind_sig_set_share         = 0.174    根签名已缓存
+bind_heaps_set_share       = 0.039    堆已缓存
+```
+
+### 判断：瓶颈是**驱动调用次数**，不是字节
+
+478 B 按 15 GB/s 折算是 **0.03 µs**，可忽略。但 t21 读代码确认：
+**每个条目是一次独立的 `CopyDescriptorsSimple(1, …)`**（descriptor/host.rs:2964/3234）。
+
+⇒ **每次 draw 打约 15 次驱动调用，只写 478 字节。**
+按每次调用 2–3 µs 折算，正好是 **30–45 µs/draw**，与 `bind_us_draw` 的 45.8 µs 吻合。
+
+### 为什么这条线有希望（与之前所有结论不同）
+
+- 之前挖的所有记账加起来 6–8 ms；
+- `State::bind` ≈ 43 ms/帧，其中 TABLES ≈ **83.5% ⇒ 约 36 ms/帧**；
+- 而修复方式是**纯机械的**：把「每条目一次调用」改成「每组一次 `CopyDescriptors`」——
+  15 次 → 约 7 次（组数），若再按脏标记合并可更低；
+- 这会改变 `descriptor/host.rs` 的写入路径，属于结构性重构，但语义等价（同样的条目写进同样的槽）。
+
+### 风险与验证方式
+
+- 描述符写入的顺序/别名必须保持（同一槽被多个组引用时不能重复写错）；
+- 必须验证：画面无变化（A/B 同一取景肉眼 + draw 数一致）、`cargo test --workspace` 绿、
+  以及真机上 `bind_tables_share` 应从 83.5% 大幅下降、帧时相应下降。
