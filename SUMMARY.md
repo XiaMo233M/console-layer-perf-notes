@@ -2754,3 +2754,51 @@ tables_direct_share  = 0.0894
 
 **不同运行的 share 不能相乘；不同模块的 share 单位必须核对（百分数 vs 小数）。**
 今后每个跨模块换算都必须在**同一次运行**里取数，并在行内标注单位。
+
+---
+
+## 76. `State::tables` 拆完：ENTRY 占 39%，没有黑洞；60 fps 判定收口
+
+### 同一次运行的完整分解（12,787 样本，share 中位）
+
+```
+ENTRY（逐条目镜像循环）  0.3887   ← 主导
+DIRECT                   0.1030
+残差                      0.0940
+PRE（entries 走查）       0.0142
+SEL（selected 走查）      0.0006
++ copies(runs/驱动) 0.06 + snap/key/insert/select/dyn/tab/view ≈0.06
+```
+
+上一轮说的「约 18 ms 未被解释」**是口径问题**（不同取景的 share 中位不能相加），不是真的黑洞。
+`State::tables` 现在每一项都有主。
+
+### 最终账（同跑口径）
+
+| 项 | 占 tables | 占 draw 路径 | 折算（preparing 54–56 ms） |
+|---|---|---|---|
+| **ENTRY 逐条目镜像** | **39%** | **~24%** | **12–13 ms** |
+| DIRECT | 10% | 6% | ~3 ms |
+| copies | 6% | 4% | ~2 ms |
+| 其余 + 残差 | 19% | 12% | ~6 ms |
+| bind 的非 tables | — | 4% | ~2 ms |
+
+### ENTRY 里为什么不可省（已实测）
+
+- 标题每 draw 换描述符表，`cbv_same = 0`、`cbv_seen = 651` ⇒ **复用率 0%**；
+- 每 draw 约 200 个条目 × 约 25 ns/条 = 约 5 µs/draw；
+- 25 ns/条 = 一次 `record_at` 读 + `make_listed` 查表 + 一次 32 B 写，已接近下限。
+
+### 60 fps 收口
+
+preparing 54–56 ms，预算 16.7 ms。**把 ENTRY(12–13) + DIRECT(3) + copies(2) + 其余(6) 全部归零，
+仍要 30 ms 以上**；而这些项里没有一个是「记账」，全是每次 draw 必须做的镜像与刷新。
+
+⇒ **60 fps 不可达，最终结论。** 现实可达：**15–20 fps**（取景相关），
+把已量的 6–8 ms（`refresh_front` 的 NOTHING 3.1 + walk 1.0 等）拿到手可到 **20 fps 上下**。
+
+### 仪器纪律（三次教训合并）
+
+1. 不同运行的 share **不能相乘**；
+2. 不同模块的 share **单位必须核对**（`draw_work` 打百分数，其它打小数）；
+3. 新增每帧字段**必须内建分母自证**（`tables_calls_per_draw` 这类），否则不可用。
