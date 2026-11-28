@@ -2551,3 +2551,43 @@ draws/frame：3,000 → 9,363（约 3 倍）
 
 把「一次 draw」的 CPU 路径按段切开（取管线/绑定/写命令/记账），用设备无关基准测每次调用；
 主机侧 3,000 draws × 23 µs = 69 ms 与实测帧时同量级，说明这条路径就是主体。
+
+---
+
+## 72. 找到了最大单项：`State::bind` 占 draw 路径 85%，约 43 ms/帧
+
+### 实测（diag 构建，同一取景，12 fps / 83.6 ms / 3,891–5,773 draws）
+
+`draw_*_share` 与除数无关，是可信量：
+
+| 段 | share |
+|---|---|
+| **BIND**（`State::bind`，draw.rs:1612） | **85.3%** |
+| ARGS（顶点/索引视图 + target/depth） | 1.31% |
+| PIPE（管线查找） | 0.12% |
+| CMD（`DrawIndexedInstanced`） | 0.017% |
+| BOOK / TRACE | 0.002% / 0.005% |
+
+`State::bind` 里做的是：`SetDescriptorHeaps`、`SetGraphicsRootSignature`、`SetPipelineState`、
+root 视图设置、以及 **TABLE 重写**（把描述符写进 shader-visible 堆）。
+
+反推：`preparing 50.8 ms ÷ 5,773 draws = 8.8 µs/draw`，其中 85.3% ⇒ **bind ≈ 43 ms/帧**，
+占整帧 83.6 ms 的 **51%**。
+
+### 为什么这是最重要的发现
+
+- 之前十几年（本会话）挖的全部记账加起来只有 **6–8 ms**；
+- 而 **bind 一项就是 43 ms**；
+- t20 的设备无关基准证明：数据结构层面（哈希 + Arc clone + 表选择）只要 **0.023 µs/draw**，
+  所以这 43 ms 全在**真实驱动调用与描述符堆写入**上，不在 Rust 侧。
+
+### 直接可问的三个问题（下一轮）
+
+1. 是否**每次 draw 都重写 TABLE**（即使绑定没变）？如果是，缓存「已绑定的表 + dirty 标记」能省掉绝大部分；
+2. 是否**每次 draw 都调 `SetPipelineState` / `SetGraphicsRootSignature`**，即使与上次相同？
+3. 描述符堆写入是**逐描述符 CopyDescriptors** 还是整表 memcpy？写了多少字节/draw？
+
+### 同时记下一个反复出现的仪器缺陷
+
+`draw_*_us` 的除数又把 `draw_calls_frame`（30）当成了 draw 数（实际 5,773），差 192 倍。
+**只有 `share` 与帧行可用于判断**——这已是本项目第 7 次同类错误。
